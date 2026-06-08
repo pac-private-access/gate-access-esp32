@@ -1,11 +1,13 @@
 #include <Arduino.h>
-#include <BluetoothSerial.h>
+#include <ArduinoBLE.h>
 #include <WiFi.h>
 #include <WebServer.h>
 
-// ===== BLUETOOTH =====
-BluetoothSerial SerialBT;
-const char* BT_NAME = "ESP32_BT";
+// ===== BLE =====
+BLEService dataService("180A");  // Generic Access service
+BLEStringCharacteristic rxCharacteristic("2A19", BLEWrite, 128);  // Rx (write from phone)
+BLEStringCharacteristic txCharacteristic("2A1A", BLERead | BLENotify, 128);  // Tx (read from ESP)
+const char* BLE_NAME = "ESP32_BLE";
 
 // ===== SOFTAP (WIFI) =====
 const char* AP_SSID = "ESP32_Network_PAC";
@@ -15,13 +17,15 @@ const char* AP_PASSWORD = "12345678";
 WebServer server(80);
 
 // ===== VARIABILE GLOBALE =====
-String btReceivedString = "";      // Stringul primit de la Bluetooth
+String btReceivedString = "";      // Stringul primit de la BLE
 String wifiReceivedString = "";    // Stringul primit de la WiFi (web)
-String btBuffer = "";               // Buffer pentru colectare Bluetooth
 unsigned long lastBTReceiveTime = 0;
 unsigned long lastWifiReceiveTime = 0;
-const unsigned long BT_TIMEOUT = 30000; // 30 sec timeout pentru BT
+const unsigned long BT_TIMEOUT = 30000; // 30 sec timeout pentru BLE
 const unsigned long WIFI_TIMEOUT = 30000; // 30 sec timeout pentru WiFi
+
+// ===== FORWARD DECLARATIONS =====
+void sendViaBLE(String message);
 
 // ===== SETUP SOFTAP =====
 void setupSoftAP() {
@@ -149,7 +153,7 @@ void handleRoot() {
     <div class='status'>Conectare WiFi pentru pagina de control</div>
     
     <div class='section'>
-      <h2>📥 Date Primite via Bluetooth</h2>
+      <h2> Date Primite via Bluetooth</h2>
       <div class='data-box' id='btDataBox'>
         <span class='empty'>Aștept date...</span>
       </div>
@@ -219,12 +223,12 @@ void handleStatus() {
   server.send(200, "application/json", json);
 }
 
-// ===== HANDLER PENTRU TRIMITERE PRIN BLUETOOTH =====
+// ===== HANDLER PENTRU TRIMITERE PRIN BLE =====
 void handleSendBT() {
   if (server.hasArg("text")) {
     String text = server.arg("text");
     
-    Serial.print("→ Web trimite pe BT: ");
+    Serial.print("→ Web trimite pe BLE: ");
     // Salvez ce s-a trimis
     wifiReceivedString = text;
     lastWifiReceiveTime = millis();
@@ -235,20 +239,51 @@ void handleSendBT() {
     if (text == "OK") {
       Serial.println("✓ Acces ACCEPTAT - Pornesc bariera...");
       // TODO: digitalWrite(SERVO_PIN, HIGH);  // Pornesc servomotor
-      SerialBT.println("✓ Acces permis - Bariera se deschide");
+      sendViaBLE("✓ Acces permis - Bariera se deschide");
     } 
     else if (text == "NOT OK") {
       Serial.println("✗ Acces REFUZAT!");
-      SerialBT.println("✗ Acces REFUZAT - Nu ai permisiune!");
+      sendViaBLE("✗ Acces REFUZAT - Nu ai permisiune!");
     }
     // =====================================
     
-    SerialBT.println(text);
+    sendViaBLE(text);
     
     server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Trimis!\"}");
   } else {
     server.send(400, "application/json", "{\"status\":\"ERROR\",\"message\":\"Text lipsit\"}");
   }
+}
+
+// ===== SETUP BLE =====
+void setupBLE() {
+  Serial.println("→ Inițializare BLE...");
+  
+  if (!BLE.begin()) {
+    Serial.println("✗ Eroare BLE!");
+    while (1);
+  }
+  
+  // Setează proprietățile BLE
+  BLE.setLocalName(BLE_NAME);
+  BLE.setAdvertisedService(dataService);
+  
+  // Adaugă caracteristicile
+  dataService.addCharacteristic(rxCharacteristic);
+  dataService.addCharacteristic(txCharacteristic);
+  
+  // Adaugă servicul
+  BLE.addService(dataService);
+  
+  // Setează valorile inițiale
+  rxCharacteristic.writeValue("");
+  txCharacteristic.writeValue("");
+  
+  // Pornește advertsingul
+  BLE.advertise();
+  Serial.print("✓ BLE pornit: ");
+  Serial.println(BLE_NAME);
+  Serial.println("  Aștept conectare...");
 }
 
 // ===== SETUP =====
@@ -257,19 +292,12 @@ void setup() {
   delay(2000);
   
   Serial.println("\n\n╔════════════════════════════════════╗");
-  Serial.println("║   ESP32 Bluetooth ↔ WiFi Gateway  ║");
+  Serial.println("║   ESP32 BLE ↔ WiFi Gateway        ║");
   Serial.println("╚════════════════════════════════════╝\n");
   
-  Serial.println("→ Inițializare Bluetooth...");
-  if (SerialBT.begin(BT_NAME)) {
-    Serial.print("✓ Bluetooth pornit: ");
-    Serial.println(BT_NAME);
-  } else {
-    Serial.println("✗ Eroare Bluetooth!");
-  }
+  setupBLE();
   
   setupSoftAP();
-  
   Serial.println("\n→ Inițializare Server Web...");
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
@@ -282,33 +310,49 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
-  server.handleClient();
+  BLEDevice central = BLE.central();
   
-  if (SerialBT.available()) {
-    char c = SerialBT.read();
-    Serial.write(c);
+  if (central) {
+    Serial.print("✓ Client BLE conectat: ");
+    Serial.println(central.address());
     
-    if (c == '\n' || c == '\r') {
-      if (btBuffer.length() > 0) {
-        btReceivedString = btBuffer;
-        Serial.print("✓ BT primit: ");
-        Serial.println(btReceivedString);
+    while (central.connected()) {
+      server.handleClient();
+      
+      // Verifica dacă am primit date pe RX characteristic
+      if (rxCharacteristic.written()) {
+        String receivedData = rxCharacteristic.value();
+        Serial.print("✓ BLE primit: ");
+        Serial.println(receivedData);
         
-        btBuffer = "";
+        btReceivedString = receivedData;
         lastBTReceiveTime = millis();
       }
-    } else {
-      btBuffer += c;
+      
+      if (btReceivedString.length() > 0 && millis() - lastBTReceiveTime > BT_TIMEOUT) {
+        btReceivedString = "";
+      }
+      
+      if (wifiReceivedString.length() > 0 && millis() - lastWifiReceiveTime > WIFI_TIMEOUT) {
+        wifiReceivedString = "";
+      }
+      
+      delay(10);
     }
+    
+    Serial.println("✗ Client BLE deconectat");
   }
   
-  if (btReceivedString.length() > 0 && millis() - lastBTReceiveTime > BT_TIMEOUT) {
-    btReceivedString = "";
+  delay(50);
+}
+
+// ===== FUNCTIE PENTRU TRIMITERE PRIN BLE =====
+void sendViaBLE(String message) {
+  if (BLE.central()) {
+    txCharacteristic.writeValue(message);
+    Serial.print("→ BLE trimis: ");
+    Serial.println(message);
+  } else {
+    Serial.println("⚠ Nici un client BLE conectat");
   }
-  
-  if (wifiReceivedString.length() > 0 && millis() - lastWifiReceiveTime > WIFI_TIMEOUT) {
-    wifiReceivedString = "";
-  }
-  
-  delay(10);
 }
