@@ -95,19 +95,19 @@ void sendToServer(String deviceData) {
     WiFiClientSecure client;
     client.setInsecure();  // Skip cert verification for IoT device
     HTTPClient http;
+    const char* headerKeys[] = {"Location"};
     http.begin(client, SERVER_URL);
+    http.collectHeaders(headerKeys, 1);
     http.addHeader("Content-Type", "application/json");
-    
-    http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
     String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
     Serial.print("→ Trimit catre server: ");
     Serial.println(payload);
 
     int httpCode = http.POST(payload);
-    
-    if (httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == 302) {
-      Serial.print("⚠ Redirect: ");
+
+    if (httpCode == 301 || httpCode == 302) {
+      Serial.print("⚠ Redirect catre: ");
       Serial.println(http.header("Location"));
     }
 
@@ -143,6 +143,7 @@ void pollServerForCommands() {
   client.setInsecure();
   HTTPClient http;
   http.begin(client, "https://pac-management.onrender.com/api/gate/poll");
+  http.setTimeout(15000);
   int httpCode = http.GET();
 
   if (httpCode == HTTP_CODE_OK) {
