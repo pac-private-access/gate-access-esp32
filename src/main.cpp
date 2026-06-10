@@ -2,6 +2,7 @@
 #include <ArduinoBLE.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESP32Servo.h>
 
 // ===== BLE =====
 BLEService dataService("180A");  // Generic Access service
@@ -16,6 +17,36 @@ const char* AP_PASSWORD = "12345678";
 // ===== WEB SERVER =====
 WebServer server(80);
 
+// ===== SERVO MOTOR =====
+#define SERVO_PIN 32  // D32 (GPIO32) - pin PWM disponibil
+Servo servoMotor;
+const int SERVO_CLOSED = 0;    // Poziția inchis
+const int SERVO_OPEN = 90;     // Poziția deschis
+
+// ===== IR SENSORS =====
+#define IR_SENSOR1 5    // GPIO5 - Receptor IR 1 (intrare pe bariera)
+#define IR_SENSOR2 27   // GPIO27 - Receptor IR 2 (ieșire din bariera)
+#define IR_TRANSMITTER1 25  // GPIO25 - Control Transmitter IR 1 (ON/OFF)
+#define IR_TRANSMITTER2 26  // GPIO26 - Control Transmitter IR 2 (ON/OFF)
+
+// ===== STARI BARIERA =====
+enum BarrierState {
+  BARRIER_CLOSED,
+  BARRIER_OPENING,
+  BARRIER_WAITING_SENSOR1,
+  BARRIER_WAITING_SENSOR2,
+  BARRIER_CLOSING,
+  BARRIER_OPEN
+};
+
+BarrierState barrierState = BARRIER_CLOSED;
+bool sensor1_blocked = false;   // Detectează dacă fasciculul IR1 este blocat
+bool sensor2_blocked = false;   // Detectează dacă fasciculul IR2 este blocat
+bool sensor1_prev_state = false;
+bool sensor2_prev_state = false;
+unsigned long barrierOpenTime = 0;
+const unsigned long BARRIER_TIMEOUT = 30000;  // 30 sec timeout
+
 // ===== VARIABILE GLOBALE =====
 String btReceivedString = "";      // Stringul primit de la BLE
 String wifiReceivedString = "";    // Stringul primit de la WiFi (web)
@@ -26,6 +57,7 @@ const unsigned long WIFI_TIMEOUT = 30000; // 30 sec timeout pentru WiFi
 
 // ===== FORWARD DECLARATIONS =====
 void sendViaBLE(String message);
+void controlBarrier(String command);
 
 // ===== SETUP SOFTAP =====
 void setupSoftAP() {
@@ -49,168 +81,9 @@ void setupSoftAP() {
 
 // ===== HANDLER WEB PENTRU PAGINA PRINCIPALA =====
 void handleRoot() {
-  String html = R"(<!DOCTYPE html>
-<html>
-<head>
-  <meta charset='UTF-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>ESP32 Bluetooth ↔ WiFi</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', Arial, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 20px;
-    }
-    .container {
-      background: white;
-      border-radius: 10px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-      padding: 30px;
-      max-width: 500px;
-      width: 100%;
-    }
-    h1 {
-      color: #333;
-      margin-bottom: 10px;
-      text-align: center;
-    }
-    .status {
-      text-align: center;
-      color: #666;
-      font-size: 14px;
-      margin-bottom: 25px;
-    }
-    .section {
-      margin-bottom: 25px;
-      padding: 20px;
-      background: #f8f9fa;
-      border-radius: 8px;
-      border-left: 4px solid #667eea;
-    }
-    .section h2 {
-      color: #667eea;
-      font-size: 16px;
-      margin-bottom: 12px;
-    }
-    .data-box {
-      background: white;
-      padding: 12px;
-      border-radius: 5px;
-      border: 1px solid #ddd;
-      word-break: break-all;
-      font-family: monospace;
-      color: #333;
-      min-height: 40px;
-      display: flex;
-      align-items: center;
-    }
-    .empty {
-      color: #999;
-      font-style: italic;
-    }
-    input[type='text'] {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      font-size: 14px;
-      margin-bottom: 10px;
-    }
-    button {
-      width: 100%;
-      padding: 12px;
-      background: #667eea;
-      color: white;
-      border: none;
-      border-radius: 5px;
-      font-size: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      transition: background 0.3s;
-    }
-    button:hover {
-      background: #764ba2;
-    }
-    button:active {
-      transform: scale(0.98);
-    }
-    .info {
-      font-size: 12px;
-      color: #999;
-      margin-top: 15px;
-      text-align: center;
-    }
-  </style>
-</head>
-<body>
-  <div class='container'>
-    <h1>📱 ESP32 Gateway</h1>
-    <div class='status'>Conectare WiFi pentru pagina de control</div>
-    
-    <div class='section'>
-      <h2> Date Primite via Bluetooth</h2>
-      <div class='data-box' id='btDataBox'>
-        <span class='empty'>Aștept date...</span>
-      </div>
-    </div>
-    
-    <div class='section'>
-      <h2>📤 Trimite via Bluetooth</h2>
-      <input type='text' id='btInput' placeholder='Introdu textul...' maxlength='100'>
-      <button onclick='sendViaBT()'>Trimite prin Bluetooth</button>
-    </div>
-    
-    <div class='info'>
-      ℹ️ Auto-refresh: 1 sec | IP: 192.168.4.1
-    </div>
-  </div>
-  
-  <script>
-    setInterval(function() {
-      fetch('/status')
-        .then(r => r.json())
-        .then(data => {
-          let box = document.getElementById('btDataBox');
-          if (data.btData && data.btData.trim().length > 0) {
-            box.textContent = data.btData;
-          } else {
-            box.innerHTML = '<span class="empty">Aștept date...</span>';
-          }
-        })
-        .catch(e => console.log('Eroare:', e));
-    }, 1000);
-    
-    function sendViaBT() {
-      let input = document.getElementById('btInput');
-      let text = input.value.trim();
-      
-      if (text.length === 0) {
-        alert('⚠️ Introdu un text!');
-        return;
-      }
-      
-      fetch('/send_bt?text=' + encodeURIComponent(text))
-        .then(r => r.json())
-        .then(data => {
-          if (data.status === 'OK') {
-            alert('✓ Trimis!');
-            input.value = '';
-          } else {
-            alert('✗ Eroare!');
-          }
-        })
-        .catch(e => alert('Eroare: ' + e));
-    }
-  </script>
-</body>
-</html>)";
-  
-  server.send(200, "text/html; charset=utf-8", html);
+  // Redirecționare HTTP 302 către site-ul extern
+  server.sendHeader("Location", "https://pac-management.onrender.com/api/gate/authorize", true);
+  server.send(302, "text/plain", "");
 }
 
 // ===== HANDLER PENTRU STATUS (JSON) =====
@@ -228,26 +101,16 @@ void handleSendBT() {
   if (server.hasArg("text")) {
     String text = server.arg("text");
     
-    Serial.print("→ Web trimite pe BLE: ");
+    Serial.print("→ Web trimite: ");
     // Salvez ce s-a trimis
     wifiReceivedString = text;
     lastWifiReceiveTime = millis();
     
     Serial.println(text);
     
-    // ===== CONDIȚIE - VERIFICA ACCES =====
-    if (text == "OK") {
-      Serial.println("✓ Acces ACCEPTAT - Pornesc bariera...");
-      // TODO: digitalWrite(SERVO_PIN, HIGH);  // Pornesc servomotor
-      sendViaBLE("✓ Acces permis - Bariera se deschide");
-    } 
-    else if (text == "NOT OK") {
-      Serial.println("✗ Acces REFUZAT!");
-      sendViaBLE("✗ Acces REFUZAT - Nu ai permisiune!");
-    }
-    // =====================================
-    
-    sendViaBLE(text);
+    // ===== CONDIȚIE - VERIFICA ACCES ȘI CONTROL BARIERA =====
+    controlBarrier(text);
+    // ==========================================================
     
     server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Trimis!\"}");
   } else {
@@ -286,6 +149,120 @@ void setupBLE() {
   Serial.println("  Aștept conectare...");
 }
 
+// ===== SETUP SERVO =====
+void setupServo() {
+  Serial.println("→ Inițializare Servo Motor...");
+  servoMotor.attach(SERVO_PIN, 1000, 2000);
+  servoMotor.write(SERVO_CLOSED);
+  Serial.println("✓ Servo Motor inițializat pe pinul D32");
+  Serial.println("  Poziție: ÎNCHIS (0°)");
+}
+
+// ===== SETUP IR SENSORS =====
+void setupIRSensors() {
+  Serial.println("→ Inițializare Senzori IR...");
+  pinMode(IR_SENSOR1, INPUT);
+  pinMode(IR_SENSOR2, INPUT);
+  pinMode(IR_TRANSMITTER1, OUTPUT);
+  pinMode(IR_TRANSMITTER2, OUTPUT);
+  digitalWrite(IR_TRANSMITTER1, LOW);  // Transmitter 1 oprit inițial
+  digitalWrite(IR_TRANSMITTER2, LOW);  // Transmitter 2 oprit inițial
+  Serial.println("✓ Senzor IR1 (GPIO5) - INTRARE");
+  Serial.println("✓ Senzor IR2 (GPIO27) - IEȘIRE");
+  Serial.println("✓ Transmitter IR1 (GPIO25) - CONTROL ON/OFF");
+  Serial.println("✓ Transmitter IR2 (GPIO26) - CONTROL ON/OFF");
+}
+
+// ===== FUNCTIE PENTRU CONTROL BARIERA =====
+void controlBarrier(String command) {
+  if (command == "OK") {
+    Serial.println("✓ Acces ACCEPTAT - Deschid bariera...");
+    digitalWrite(IR_TRANSMITTER1, HIGH);  // Activez transmitter IR 1
+    digitalWrite(IR_TRANSMITTER2, HIGH);  // Activez transmitter IR 2
+    delay(50);
+    servoMotor.write(SERVO_OPEN);
+    barrierState = BARRIER_OPENING;
+    barrierOpenTime = millis();
+    sensor1_blocked = false;
+    sensor2_blocked = false;
+    Serial.println("  Transmitter IR: PORNIT (ambii) - Aștept mașini...");
+    sendViaBLE("✓ Acces permis - Bariera se deschide");
+  }
+  else if (command == "NOT OK") {
+    Serial.println("✗ Acces REFUZAT - Bariera rămâne ÎNCHIS");
+    digitalWrite(IR_TRANSMITTER1, LOW);
+    digitalWrite(IR_TRANSMITTER2, LOW);
+    servoMotor.write(SERVO_CLOSED);
+    barrierState = BARRIER_CLOSED;
+    sensor1_blocked = false;
+    sensor2_blocked = false;
+    sendViaBLE("✗ Acces REFUZAT - Nu ai permisiune!");
+  }
+}
+
+// ===== FUNCTIE PENTRU CITIRE SENZORI IR =====
+void checkIRSensors() {
+  bool ir1_current = (digitalRead(IR_SENSOR1) == LOW);  // LOW = fascicul blocat
+  bool ir2_current = (digitalRead(IR_SENSOR2) == LOW);
+  
+  // Detecție tranziție senzor 1 (HIGH -> LOW = mașina INTRĂ)
+  if (ir1_current && !sensor1_prev_state) {
+    Serial.println("✓ Mașina DETECTATĂ pe Senzor 1!");
+    sensor1_blocked = true;
+  }
+  sensor1_prev_state = ir1_current;
+  
+  // Detecție tranziție senzor 2 (HIGH -> LOW = mașina IESE)
+  if (ir2_current && !sensor2_prev_state) {
+    Serial.println("✓ Mașina DETECTATĂ pe Senzor 2!");
+    sensor2_blocked = true;
+  }
+  sensor2_prev_state = ir2_current;
+  
+  // Mașină de stări pentru control bariera
+  switch (barrierState) {
+    case BARRIER_OPENING:
+      barrierState = BARRIER_WAITING_SENSOR1;
+      break;
+    
+    case BARRIER_WAITING_SENSOR1:
+      if (sensor1_blocked) {
+        Serial.println("✓✓ Senzor 1 OK - Aștept Senzor 2...");
+        barrierState = BARRIER_WAITING_SENSOR2;
+      }
+      break;
+    
+    case BARRIER_WAITING_SENSOR2:
+      if (sensor2_blocked) {
+        Serial.println("✓✓✓ INCHID BARIERA!");
+        servoMotor.write(SERVO_CLOSED);
+        digitalWrite(IR_TRANSMITTER1, LOW);  // Opresc transmitter 1
+        digitalWrite(IR_TRANSMITTER2, LOW);  // Opresc transmitter 2
+        barrierState = BARRIER_CLOSED;
+        sensor1_blocked = false;
+        sensor2_blocked = false;
+        sendViaBLE("✓ Mașina a trecut - Bariera se închide");
+      }
+      break;
+    
+    case BARRIER_CLOSED:
+    case BARRIER_OPEN:
+    default:
+      break;
+  }
+  
+  // Timeout de siguranță
+  if (barrierState != BARRIER_CLOSED && millis() - barrierOpenTime > BARRIER_TIMEOUT) {
+    Serial.println("⚠ TIMEOUT - Inchid bariera forțat!");
+    servoMotor.write(SERVO_CLOSED);
+    digitalWrite(IR_TRANSMITTER1, LOW);
+    digitalWrite(IR_TRANSMITTER2, LOW);
+    barrierState = BARRIER_CLOSED;
+    sensor1_blocked = false;
+    sensor2_blocked = false;
+  }
+}
+
 // ===== SETUP =====
 void setup() {
   Serial.begin(9600);
@@ -305,11 +282,17 @@ void setup() {
   server.begin();
   Serial.println("✓ Server web pornit pe 192.168.4.1");
   
+  setupServo();
+  setupIRSensors();
+  
   Serial.println("\n✓ Sistem ready!\n");
 }
 
 // ===== LOOP =====
 void loop() {
+  server.handleClient();  // Procesează cererile WiFi NTOTDEAUNA
+  checkIRSensors();       // Verifica senzori IR pentru detecție mașină
+  
   BLEDevice central = BLE.central();
   
   if (central) {
@@ -318,6 +301,7 @@ void loop() {
     
     while (central.connected()) {
       server.handleClient();
+      checkIRSensors();  // Verifica senzori și în timp ce BLE e conectat
       
       // Verifica dacă am primit date pe RX characteristic
       if (rxCharacteristic.written()) {
