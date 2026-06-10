@@ -97,13 +97,19 @@ void sendToServer(String deviceData) {
     HTTPClient http;
     http.begin(client, SERVER_URL);
     http.addHeader("Content-Type", "application/json");
-    
+    http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
     String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
     Serial.print("→ Trimit catre server: ");
     Serial.println(payload);
-    
+
     int httpCode = http.POST(payload);
-    
+
+    if (httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == 302) {
+      Serial.print("⚠ Redirect: ");
+      Serial.println(http.header("Location"));
+    }
+
     if (httpCode == HTTP_CODE_OK) {
       String response = http.getString();
       Serial.print("✓ Raspuns server: ");
