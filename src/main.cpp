@@ -54,12 +54,15 @@ String btReceivedString = "";      // Stringul primit de la BLE
 String wifiReceivedString = "";    // Stringul primit de la WiFi (web)
 unsigned long lastBTReceiveTime = 0;
 unsigned long lastWifiReceiveTime = 0;
-const unsigned long BT_TIMEOUT = 30000; // 30 sec timeout pentru BLE
+unsigned long lastPollTime = 0;
+const unsigned long BT_TIMEOUT = 30000;   // 30 sec timeout pentru BLE
 const unsigned long WIFI_TIMEOUT = 30000; // 30 sec timeout pentru WiFi
+const unsigned long POLL_INTERVAL = 2000; // 2 sec poll catre server
 
 // ===== FORWARD DECLARATIONS =====
 void sendViaBLE(String message);
 void controlBarrier(String command);
+void pollServerForCommands();
 
 // ===== SETUP WIFI CLIENT =====
 void setupWiFi() {
@@ -120,6 +123,25 @@ void sendToServer(String deviceData) {
   } else {
     Serial.println("⚠ WiFi deconectat!");
   }
+}
+
+// ===== POLLING COMENZI DE LA SERVER =====
+void pollServerForCommands() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin("https://pac-management.onrender.com/api/gate/poll");
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String response = http.getString();
+    if (response.indexOf("OPEN") != -1) {
+      Serial.println("→ Comanda OPEN primita de la server!");
+      controlBarrier("OK");
+    }
+  }
+
+  http.end();
 }
 
 // ===== HANDLER WEB PENTRU PAGINA PRINCIPALA =====
@@ -330,9 +352,14 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
-  server.handleClient();  // Procesează cererile WiFi NTOTDEAUNA
-  checkIRSensors();       // Verifica senzori IR pentru detecție mașină
-  
+  server.handleClient();
+  checkIRSensors();
+
+  if (millis() - lastPollTime > POLL_INTERVAL) {
+    lastPollTime = millis();
+    pollServerForCommands();
+  }
+
   BLEDevice central = BLE.central();
   
   if (central) {
@@ -341,8 +368,13 @@ void loop() {
     
     while (central.connected()) {
       server.handleClient();
-      checkIRSensors();  // Verifica senzori și în timp ce BLE e conectat
-      
+      checkIRSensors();
+
+      if (millis() - lastPollTime > POLL_INTERVAL) {
+        lastPollTime = millis();
+        pollServerForCommands();
+      }
+
       // Verifica dacă am primit date pe RX characteristic
       if (rxCharacteristic.written()) {
         String receivedData = rxCharacteristic.value();
