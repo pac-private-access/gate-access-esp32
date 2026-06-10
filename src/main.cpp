@@ -2,6 +2,7 @@
 #include <ArduinoBLE.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 #include <ESP32Servo.h>
 
 // ===== BLE =====
@@ -10,9 +11,10 @@ BLEStringCharacteristic rxCharacteristic("2A19", BLEWrite, 128);  // Rx (write f
 BLEStringCharacteristic txCharacteristic("2A1A", BLERead | BLENotify, 128);  // Tx (read from ESP)
 const char* BLE_NAME = "ESP32_BLE";
 
-// ===== SOFTAP (WIFI) =====
-const char* AP_SSID = "ESP32_Network_PAC";
-const char* AP_PASSWORD = "12345678";
+// ===== WIFI CREDENTIALS =====
+const char* WIFI_SSID = "iPhone - Adrian";
+const char* WIFI_PASSWORD = "12456789";
+const char* SERVER_URL = "https://pac-management.onrender.com/api/gate/authorize";
 
 // ===== WEB SERVER =====
 WebServer server(80);
@@ -59,31 +61,71 @@ const unsigned long WIFI_TIMEOUT = 30000; // 30 sec timeout pentru WiFi
 void sendViaBLE(String message);
 void controlBarrier(String command);
 
-// ===== SETUP SOFTAP =====
-void setupSoftAP() {
-  Serial.println("\n=== Inițializare SoftAP ===");
-  WiFi.mode(WIFI_AP);
+// ===== SETUP WIFI CLIENT =====
+void setupWiFi() {
+  Serial.println("\n=== Conectare la WiFi ===");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   
-  bool result = WiFi.softAP(AP_SSID, AP_PASSWORD);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
   
-  if (result) {
-    Serial.println("✓ SoftAP inițializat cu succes!");
-    Serial.print("  Rețea: ");
-    Serial.println(AP_SSID);
-    Serial.print("  Parola: ");
-    Serial.println(AP_PASSWORD);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✓ Conectat la WiFi!");
+    Serial.print("  SSID: ");
+    Serial.println(WIFI_SSID);
     Serial.print("  IP: ");
-    Serial.println(WiFi.softAPIP());
+    Serial.println(WiFi.localIP());
   } else {
-    Serial.println("✗ Eroare la inițializare SoftAP!");
+    Serial.println("\n✗ Eroare la conexiune WiFi!");
+  }
+}
+
+// ===== FUNCTIE PENTRU TRIMITERE CATRE SERVER =====
+void sendToServer(String deviceData) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(SERVER_URL);
+    http.addHeader("Content-Type", "application/json");
+    
+    String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
+    Serial.print("→ Trimit catre server: ");
+    Serial.println(payload);
+    
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == HTTP_CODE_OK) {
+      String response = http.getString();
+      Serial.print("✓ Raspuns server: ");
+      Serial.println(response);
+      
+      // Parse raspunsul pentru OK/NOT OK
+      if (response.indexOf("OK") != -1) {
+        Serial.println("→ Server: ACCES ACCEPTAT");
+        controlBarrier("OK");
+      } else if (response.indexOf("NOT OK") != -1 || response.indexOf("REFUSED") != -1) {
+        Serial.println("→ Server: ACCES REFUZAT");
+        controlBarrier("NOT OK");
+      }
+    } else {
+      Serial.print("✗ Eroare HTTP: ");
+      Serial.println(httpCode);
+    }
+    
+    http.end();
+  } else {
+    Serial.println("⚠ WiFi deconectat!");
   }
 }
 
 // ===== HANDLER WEB PENTRU PAGINA PRINCIPALA =====
 void handleRoot() {
-  // Redirecționare HTTP 302 către site-ul extern
-  server.sendHeader("Location", "https://pac-management.onrender.com/api/gate/authorize", true);
-  server.send(302, "text/plain", "");
+  String json = "{\"status\":\"OK\",\"wifi\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",\"barrier\":" + String(barrierState) + "}";
+  server.send(200, "application/json", json);
 }
 
 // ===== HANDLER PENTRU STATUS (JSON) =====
@@ -102,15 +144,13 @@ void handleSendBT() {
     String text = server.arg("text");
     
     Serial.print("→ Web trimite: ");
-    // Salvez ce s-a trimis
     wifiReceivedString = text;
     lastWifiReceiveTime = millis();
     
     Serial.println(text);
     
-    // ===== CONDIȚIE - VERIFICA ACCES ȘI CONTROL BARIERA =====
-    controlBarrier(text);
-    // ==========================================================
+    // Trimite data catre server
+    sendToServer(text);
     
     server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Trimis!\"}");
   } else {
@@ -273,14 +313,14 @@ void setup() {
   Serial.println("╚════════════════════════════════════╝\n");
   
   setupBLE();
+  setupWiFi();
   
-  setupSoftAP();
-  Serial.println("\n→ Inițializare Server Web...");
+  Serial.println("\n→ Inițializare Server Web local...");
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
   server.on("/send_bt", handleSendBT);
   server.begin();
-  Serial.println("✓ Server web pornit pe 192.168.4.1");
+  Serial.println("✓ Server web pornit (local control enabled)");
   
   setupServo();
   setupIRSensors();
@@ -311,6 +351,9 @@ void loop() {
         
         btReceivedString = receivedData;
         lastBTReceiveTime = millis();
+        
+        // Trimite data catre server
+        sendToServer(receivedData);
       }
       
       if (btReceivedString.length() > 0 && millis() - lastBTReceiveTime > BT_TIMEOUT) {
