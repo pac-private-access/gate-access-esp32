@@ -88,7 +88,6 @@ void setupWiFi() {
   }
 }
 
-// ===== FUNCTIE PENTRU TRIMITERE CATRE SERVER =====
 void sendToServer(String deviceData) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
