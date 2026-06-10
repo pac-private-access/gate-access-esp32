@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoBLE.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <ESP32Servo.h>
@@ -91,8 +92,10 @@ void setupWiFi() {
 // ===== FUNCTIE PENTRU TRIMITERE CATRE SERVER =====
 void sendToServer(String deviceData) {
   if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();  // Skip cert verification for IoT device
     HTTPClient http;
-    http.begin(SERVER_URL);
+    http.begin(client, SERVER_URL);
     http.addHeader("Content-Type", "application/json");
     
     String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
@@ -129,8 +132,10 @@ void sendToServer(String deviceData) {
 void pollServerForCommands() {
   if (WiFi.status() != WL_CONNECTED) return;
 
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
-  http.begin("https://pac-management.onrender.com/api/gate/poll");
+  http.begin(client, "https://pac-management.onrender.com/api/gate/poll");
   int httpCode = http.GET();
 
   if (httpCode == HTTP_CODE_OK) {
