@@ -15,7 +15,7 @@ const char* BLE_NAME = "ESP32_BLE";
 // ===== WIFI CREDENTIALS =====
 const char* WIFI_SSID = "iPhone - Adrian";
 const char* WIFI_PASSWORD = "12456789";
-const char* SERVER_URL = "https://pac-management.onrender.com/api/gate/authorize";
+const char* SERVER_URL = "https://192.168.56.1:8080/api/gate/authorize";
 
 // ===== WEB SERVER =====
 WebServer server(80);
@@ -100,7 +100,7 @@ void sendToServer(String deviceData) {
     http.collectHeaders(headerKeys, 1);
     http.addHeader("Content-Type", "application/json");
 
-    String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
+    String payload = "{\"deviceId\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
     Serial.print("→ Trimit catre server: ");
     Serial.println(payload);
 
