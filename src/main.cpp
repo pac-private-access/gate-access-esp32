@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoBLE.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <ESP32Servo.h>
@@ -15,6 +16,7 @@ const char* BLE_NAME = "ESP32_BLE";
 const char* WIFI_SSID = "iPhone - Adrian";
 const char* WIFI_PASSWORD = "12456789";
 const char* SERVER_URL = "https://pac-management.onrender.com/api/gate/authorize";
+const char* POLL_URL   = "https://pac-management.onrender.com/api/gate/poll";
 
 // ===== WEB SERVER =====
 WebServer server(80);
@@ -54,12 +56,15 @@ String btReceivedString = "";      // Stringul primit de la BLE
 String wifiReceivedString = "";    // Stringul primit de la WiFi (web)
 unsigned long lastBTReceiveTime = 0;
 unsigned long lastWifiReceiveTime = 0;
-const unsigned long BT_TIMEOUT = 30000; // 30 sec timeout pentru BLE
+unsigned long lastPollTime = 0;
+const unsigned long BT_TIMEOUT = 30000;   // 30 sec timeout pentru BLE
 const unsigned long WIFI_TIMEOUT = 30000; // 30 sec timeout pentru WiFi
+const unsigned long POLL_INTERVAL = 2000; // 2 sec poll catre server
 
 // ===== FORWARD DECLARATIONS =====
 void sendViaBLE(String message);
 void controlBarrier(String command);
+void pollServerForCommands();
 
 // ===== SETUP WIFI CLIENT =====
 void setupWiFi() {
@@ -88,26 +93,28 @@ void setupWiFi() {
 // ===== FUNCTIE PENTRU TRIMITERE CATRE SERVER =====
 void sendToServer(String deviceData) {
   if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();  // Fara verificare certificat SSL pe IoT
+
     HTTPClient http;
-    http.begin(SERVER_URL);
+    http.begin(client, SERVER_URL);
     http.addHeader("Content-Type", "application/json");
-    
-    String payload = "{\"device_id\":\"ESP32_PAC\",\"data\":\"" + deviceData + "\"}";
+
+    String payload = "{\"bluetoothSecurityCode\":\"" + deviceData + "\",\"accessMethod\":\"bluetooth_esp32\",\"direction\":\"ENTRY\"}";
     Serial.print("→ Trimit catre server: ");
     Serial.println(payload);
-    
+
     int httpCode = http.POST(payload);
-    
+
     if (httpCode == HTTP_CODE_OK) {
       String response = http.getString();
       Serial.print("✓ Raspuns server: ");
       Serial.println(response);
-      
-      // Parse raspunsul pentru OK/NOT OK
-      if (response.indexOf("OK") != -1) {
+
+      if (response.indexOf("GRANTED") != -1) {
         Serial.println("→ Server: ACCES ACCEPTAT");
         controlBarrier("OK");
-      } else if (response.indexOf("NOT OK") != -1 || response.indexOf("REFUSED") != -1) {
+      } else if (response.indexOf("DENIED") != -1) {
         Serial.println("→ Server: ACCES REFUZAT");
         controlBarrier("NOT OK");
       }
@@ -115,11 +122,33 @@ void sendToServer(String deviceData) {
       Serial.print("✗ Eroare HTTP: ");
       Serial.println(httpCode);
     }
-    
+
     http.end();
   } else {
     Serial.println("⚠ WiFi deconectat!");
   }
+}
+
+// ===== POLLING COMENZI DE LA SERVER =====
+void pollServerForCommands() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.begin(client, POLL_URL);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String response = http.getString();
+    if (response.indexOf("OPEN") != -1) {
+      Serial.println("→ Comanda OPEN primita de la server — Deschid bariera!");
+      controlBarrier("OK");
+    }
+  }
+
+  http.end();
 }
 
 // ===== HANDLER WEB PENTRU PAGINA PRINCIPALA =====
@@ -332,44 +361,56 @@ void setup() {
 void loop() {
   server.handleClient();  // Procesează cererile WiFi NTOTDEAUNA
   checkIRSensors();       // Verifica senzori IR pentru detecție mașină
-  
+
+  // Poll serverul pentru comenzi (buton web sau mobil)
+  if (millis() - lastPollTime > POLL_INTERVAL) {
+    lastPollTime = millis();
+    pollServerForCommands();
+  }
+
   BLEDevice central = BLE.central();
-  
+
   if (central) {
     Serial.print("✓ Client BLE conectat: ");
     Serial.println(central.address());
-    
+
     while (central.connected()) {
       server.handleClient();
-      checkIRSensors();  // Verifica senzori și în timp ce BLE e conectat
-      
+      checkIRSensors();
+
+      // Poll și în timp ce BLE e conectat
+      if (millis() - lastPollTime > POLL_INTERVAL) {
+        lastPollTime = millis();
+        pollServerForCommands();
+      }
+
       // Verifica dacă am primit date pe RX characteristic
       if (rxCharacteristic.written()) {
         String receivedData = rxCharacteristic.value();
         Serial.print("✓ BLE primit: ");
         Serial.println(receivedData);
-        
+
         btReceivedString = receivedData;
         lastBTReceiveTime = millis();
-        
+
         // Trimite data catre server
         sendToServer(receivedData);
       }
-      
+
       if (btReceivedString.length() > 0 && millis() - lastBTReceiveTime > BT_TIMEOUT) {
         btReceivedString = "";
       }
-      
+
       if (wifiReceivedString.length() > 0 && millis() - lastWifiReceiveTime > WIFI_TIMEOUT) {
         wifiReceivedString = "";
       }
-      
+
       delay(10);
     }
-    
+
     Serial.println("✗ Client BLE deconectat");
   }
-  
+
   delay(50);
 }
 
